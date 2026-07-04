@@ -1,0 +1,8 @@
+[project]
+name = "codebase-explorer-mcp"
+version = "1.0.0"
+description = "MCP server to explore, analyze, and understand any codebase"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.6.0",
+]

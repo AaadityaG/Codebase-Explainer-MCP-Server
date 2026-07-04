@@ -7,6 +7,8 @@ from analyzer import (
     search_codebase,
     generate_architecture_diagram,
     find_dead_code,
+    find_git_info,
+    scan_secrets,
 )
 
 mcp = FastMCP("codebase-explorer")
@@ -172,6 +174,24 @@ async def generate_architecture(path: str) -> str:
 async def analyze_dead_code(path: str) -> str:
     """Find potentially dead (unused) code — functions, classes, exports defined but never referenced elsewhere."""
     result = await find_dead_code(path)
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return result["report"]
+
+
+@mcp.tool()
+async def get_git_info(path: str) -> str:
+    """Get git intelligence for a repository — branch, recent commits, contributors, hot files, and uncommitted changes."""
+    result = await find_git_info(path)
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return result["report"]
+
+
+@mcp.tool()
+async def find_secrets(path: str) -> str:
+    """Scan the codebase for hardcoded secrets — API keys, tokens, passwords, private keys, and database credentials."""
+    result = await scan_secrets(path)
     if "error" in result:
         return f"Error: {result['error']}"
     return result["report"]

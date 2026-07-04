@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -949,5 +951,276 @@ async def find_dead_code(root_path: str) -> dict[str, Any]:
         "deadCount": len(dead_items),
         "deadFiles": len(dead_summary),
         "deadItems": dead_items,
+        "report": "\n".join(lines),
+    }
+
+
+# ============ Git Intelligence ============
+
+async def find_git_info(root_path: str) -> dict[str, Any]:
+    root = Path(root_path).resolve()
+    if not root.is_dir():
+        return {"error": f"Directory not found: {root_path}"}
+
+    git_dir = root / ".git"
+    if not git_dir.exists():
+        return {"error": "Not a git repository (no .git directory)"}
+
+    async def _git(args: str) -> str:
+        loop = asyncio.get_event_loop()
+        try:
+            proc = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["git", "-C", str(root)] + args.split(),
+                    capture_output=True, text=True, timeout=15,
+                    encoding="utf-8", errors="ignore",
+                ),
+            )
+            return proc.stdout.strip()
+        except Exception:
+            return ""
+
+    branch = await _git("rev-parse --abbrev-ref HEAD")
+    remote = await _git("config --get remote.origin.url")
+    total_commits = await _git("rev-list --count HEAD")
+
+    log_raw = await _git("log --oneline -25 --format=%H%x00%an%x00%ai%x00%s")
+    commits: list[dict[str, str]] = []
+    for entry in log_raw.split("\n"):
+        if not entry:
+            continue
+        parts = entry.split("\0", 3)
+        if len(parts) >= 4:
+            commits.append({
+                "hash": parts[0][:8],
+                "author": parts[1],
+                "date": parts[2],
+                "message": parts[3],
+            })
+
+    shortlog = await _git("shortlog -sne HEAD")
+    contribs: list[dict[str, Any]] = []
+    for line in shortlog.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        count_s, author_info = parts
+        if count_s.isdigit():
+            name = author_info
+            email = ""
+            if "<" in name:
+                name, email = name.rsplit("<", 1)
+                email = email.rstrip(">")
+            contribs.append({
+                "name": name.strip(),
+                "email": email.strip(),
+                "commits": int(count_s),
+            })
+
+    status_raw = await _git("status --short")
+    uncommitted: dict[str, list[str]] = {"modified": [], "staged": [], "untracked": []}
+    for line in status_raw.split("\n"):
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        prefix = line[:2]
+        fpath = line[2:].strip()
+        if prefix == "??":
+            uncommitted["untracked"].append(fpath)
+            continue
+        x, y = prefix[0], prefix[1]
+        if x != " ":
+            uncommitted["staged"].append(fpath)
+        if y != " ":
+            uncommitted["modified"].append(fpath)
+
+    hot_raw = await _git("log --format= --name-only | sort | uniq -c | sort -rn | head -20")
+    hot_files: list[dict[str, Any]] = []
+    for line in hot_raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            hot_files.append({"file": parts[1], "changes": int(parts[0])})
+
+    first_date = await _git("log --format=%ai --max-parents=0 HEAD")
+    last_date = await _git("log -1 --format=%ai")
+    total_changes = sum(len(v) for v in uncommitted.values())
+
+    lines: list[str] = [
+        f"# Git Intelligence: {root.name}",
+        "",
+        f"**Branch:** `{branch or '(detached)'}`",
+        f"**Remote:** `{remote or '(none)'}`",
+        f"**Total commits:** `{total_commits or 0}`",
+        f"**Created:** `{first_date or 'N/A'}`  |  **Last commit:** `{last_date or 'N/A'}`",
+        f"**Uncommitted changes:** {total_changes}",
+    ]
+
+    if commits:
+        lines.append(f"\n## Recent Commits ({len(commits)})")
+        for c in commits:
+            lines.append(f"- `{c['hash']}` {c['author']} ({c['date'][:10]})  {c['message']}")
+
+    if contribs:
+        lines.append(f"\n## Contributors ({len(contribs)})")
+        for c in contribs:
+            lines.append(f"- {c['name']}  {c['commits']} commits")
+
+    if hot_files:
+        lines.append(f"\n## Hot Files (most frequently changed)")
+        for hf in hot_files[:10]:
+            lines.append(f"- `{hf['file']}`  {hf['changes']} changes")
+
+    if total_changes > 0:
+        lines.append(f"\n## Uncommitted Changes ({total_changes})")
+        for category in ("staged", "modified", "untracked"):
+            label = {"staged": "Staged", "modified": "Modified", "untracked": "Untracked"}[category]
+            items = uncommitted[category]
+            if items:
+                for f in items[:10]:
+                    lines.append(f"- [{label}] `{f}`")
+                if len(items) > 10:
+                    lines.append(f"  ...and {len(items) - 10} more")
+
+    return {
+        "projectName": root.name,
+        "branch": branch or "(detached)",
+        "remote": remote or "(none)",
+        "totalCommits": int(total_commits) if total_commits.isdigit() else 0,
+        "recentCommits": commits,
+        "contributors": contribs,
+        "hotFiles": hot_files,
+        "uncommittedChanges": uncommitted,
+        "report": "\n".join(lines),
+    }
+
+
+# ============ Secret Scanner ============
+
+SECRET_PATTERNS: list[tuple[str, str]] = [
+    ("OpenAI API Key", r"sk-[a-zA-Z0-9_\-]{20,}"),
+    ("GitHub Token", r"gh[psu]_[a-zA-Z0-9_\-]{36,}"),
+    ("AWS Access Key ID", r"(?:AKIA|ASIA)[0-9A-Z]{16}"),
+    ("AWS Secret Key", r'(?i)(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[:=]\s*["\'][a-zA-Z0-9\/+=]{40}["\']'),
+    ("Google API Key", r"AIza[0-9A-Za-z\-_]{35}"),
+    ("Stripe Live Key", r"(?:sk_live_|pk_live_)[a-zA-Z0-9_\-]{20,}"),
+    ("Slack Bot Token", r"xox[baprs]-[a-zA-Z0-9\-]{10,}"),
+    ("Discord Bot Token", r"[a-zA-Z0-9_\-]{24}\.[a-zA-Z0-9_\-]{6}\.[a-zA-Z0-9_\-]{27}"),
+    ("JWT Token", r"eyJ[a-zA-Z0-9_\-]+\.eyJ[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+"),
+    ("SSH Private Key", r"-----BEGIN\s+(?:RSA|DSA|EC|OPENSSH)\s+PRIVATE\s+KEY-----"),
+    ("Password in Code", r'(?i)(?:password|passwd|pwd)\s*[:=]\s*["\'][^"\'\s]{4,}["\']'),
+    ("API Key / Secret in Code", r'(?i)(?:api[_-]?key|apikey|secret_key|secret)\s*[:=]\s*["\'][^"\'\s]{8,}["\']'),
+    ("Database URL with Credentials", r"(?:postgres|mysql|mongodb|redis)://[a-zA-Z0-9_\-]+:[a-zA-Z0-9_\-]+@"),
+    ("Heroku API Key", r"heroku[a-zA-Z0-9_\-]{20,}"),
+    ("GitLab Token", r"glpat-[a-zA-Z0-9_\-]{20,}"),
+    ("npm Token", r"npm_[a-zA-Z0-9_\-]{30,}"),
+    ("Private Key PEM", r"-----BEGIN\s+PRIVATE\s+KEY-----"),
+]
+
+SECRET_EXCLUDE_PATTERNS: list[re.Pattern] = [
+    re.compile(r"example|placeholder|your_key|your_secret|changeme|TODO|FIXME|dummy|test_key|fake", re.IGNORECASE),
+]
+
+
+async def scan_secrets(root_path: str) -> dict[str, Any]:
+    root = Path(root_path).resolve()
+    if not root.is_dir():
+        return {"error": f"Directory not found: {root_path}"}
+
+    source_files = collect_source_files(root)
+
+    env_files: list[Path] = []
+    for p in [".env", ".env.*", ".envrc", ".secrets"]:
+        for matched in root.glob(p):
+            if matched.is_file():
+                env_files.append(matched)
+        for matched in root.glob("**/" + p):
+            if matched.is_file():
+                env_files.append(matched)
+
+    all_files = source_files + [f for f in env_files if f not in source_files]
+
+    results: list[dict[str, Any]] = []
+    compiled = [(name, re.compile(pat)) for name, pat in SECRET_PATTERNS]
+
+    for filepath in all_files:
+        relative = filepath.relative_to(root).as_posix()
+        try:
+            content = filepath.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        for name, pattern in compiled:
+            for match in pattern.finditer(content):
+                matched_text = match.group(0)
+                if len(matched_text) > 60:
+                    matched_text = matched_text[:30] + "..." + matched_text[-27:]
+                if any(ex.search(content) for ex in SECRET_EXCLUDE_PATTERNS):
+                    continue
+                line_num = content[: match.start()].count("\n") + 1
+                results.append({
+                    "file": relative,
+                    "line": line_num,
+                    "type": name,
+                    "match": matched_text,
+                })
+
+    results.sort(key=lambda x: (x["file"], x["line"]))
+
+    summary: dict[str, list[dict]] = {}
+    for r in results:
+        summary.setdefault(r["file"], []).append(r)
+
+    lines: list[str] = [
+        f"# Secret Scan: {root.name}",
+        "",
+        f"**Total findings:** {len(results)}  |  **Files with secrets:** {len(summary)}",
+        "",
+    ]
+
+    if not results:
+        lines.append("No secrets detected. The codebase looks clean.")
+        return {
+            "projectName": root.name,
+            "totalSecrets": 0,
+            "filesWithSecrets": 0,
+            "secrets": [],
+            "report": "\n".join(lines),
+        }
+
+    by_type: dict[str, int] = {}
+    for r in results:
+        by_type[r["type"]] = by_type.get(r["type"], 0) + 1
+
+    lines.append("### Breakdown by Type")
+    for t, c in sorted(by_type.items(), key=lambda x: -x[1]):
+        lines.append(f"- **{t}:** {c}")
+
+    lines.append("")
+    lines.append("## Locations")
+    lines.append("")
+    for filepath, items in sorted(summary.items()):
+        lines.append(f"### `{filepath}` ({len(items)})")
+        for item in items:
+            safe_match = item["match"].replace("`", "")
+            lines.append(f"- Line {item['line']}: **{item['type']}** - `{safe_match}`")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("> **Warning:** Results are heuristic. Verify each finding before acting.")
+    lines.append("> Rotate any exposed real credentials immediately. Some findings may be")
+    lines.append("> placeholder, example, or test data.")
+
+    return {
+        "projectName": root.name,
+        "totalSecrets": len(results),
+        "filesWithSecrets": len(summary),
+        "secrets": results,
         "report": "\n".join(lines),
     }

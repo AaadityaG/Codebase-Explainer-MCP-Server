@@ -6,6 +6,7 @@ from analyzer import (
     find_features as find_features_in_files,
     search_codebase,
     generate_architecture_diagram,
+    find_dead_code,
 )
 
 mcp = FastMCP("codebase-explorer")
@@ -165,6 +166,15 @@ async def generate_architecture(path: str) -> str:
     if "error" in result:
         return f"Error: {result['error']}"
     return result["diagram"]
+
+
+@mcp.tool()
+async def analyze_dead_code(path: str) -> str:
+    """Find potentially dead (unused) code — functions, classes, exports defined but never referenced elsewhere."""
+    result = await find_dead_code(path)
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return result["report"]
 
 
 @mcp.tool()

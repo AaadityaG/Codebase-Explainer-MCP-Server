@@ -71,6 +71,7 @@ Opens `http://localhost:6274` — test all tools live in a web UI.
 | `find_features` | `path` | Routes, controllers, components, tests, interfaces |
 | `get_feature_detail` | `path`, `name` | Code context around a feature (auto-locates file + line) |
 | `generate_architecture` | `path` | Layered Mermaid diagram — entry points, API, services, data, UI with import connections |
+| `analyze_dead_code` | `path` | Functions, classes, and exports defined but never referenced elsewhere |
 | `search_symbols` | `path`, `pattern` | Regex search results across all source files |
 | `list_project_types` | _(none)_ | List of project types and frameworks the server can detect |
 
@@ -79,11 +80,13 @@ Opens `http://localhost:6274` — test all tools live in a web UI.
 1. Get an overview: `analyze_structure(path="C:\\MyProject")`
 2. See the big picture: `generate_architecture(path="C:\\MyProject")`
    → Renders a Mermaid diagram with layers: Entry → API → Logic → Data → UI, plus import graph edges
-3. Find specific features: `find_features(path="C:\\MyProject")`
+3. Find dead code: `analyze_dead_code(path="C:\\MyProject")`
+   → Lists functions, classes, and exports defined but never imported or referenced elsewhere
+4. Find specific features: `find_features(path="C:\\MyProject")`
    → See all API routes, controllers, tests listed with their file locations
-4. Inspect one: `get_feature_detail(path="C:\\MyProject", name="get_users")`
+5. Inspect one: `get_feature_detail(path="C:\\MyProject", name="get_users")`
    → Shows code context around that feature, no need to know the file or line number
-5. Search: `search_symbols(path="C:\\MyProject", pattern="async def")`
+6. Search: `search_symbols(path="C:\\MyProject", pattern="async def")`
    → Find all async functions in the codebase
 
 ### Alternative setup (without `uv`)

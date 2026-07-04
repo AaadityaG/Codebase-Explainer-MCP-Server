@@ -735,3 +735,219 @@ async def generate_architecture_diagram(root_path: str) -> dict[str, Any]:
         "connections": len(unique_conns),
         "diagram": "\n".join(md_lines),
     }
+
+
+DEF_PATTERNS: dict[str, list[re.Pattern]] = {
+    "py": [
+        re.compile(r'^(?:async\s+)?def\s+(\w+)\s*\(', re.MULTILINE),
+        re.compile(r'^class\s+(\w+)\s*(?:\(|:)', re.MULTILINE),
+    ],
+    "js": [
+        re.compile(r'^export\s+(?:default\s+)?(?:function|const|let|var|class)\s+(\w+)', re.MULTILINE),
+        re.compile(r'^(?:function|const|let|var|class)\s+(\w+)', re.MULTILINE),
+        re.compile(r'^export\s+default\s+(\w+)', re.MULTILINE),
+    ],
+    "ts": [
+        re.compile(r'^export\s+(?:default\s+)?(?:function|const|let|var|class|interface|type)\s+(\w+)', re.MULTILINE),
+        re.compile(r'^(?:function|const|let|var|class|interface|type)\s+(\w+)', re.MULTILINE),
+        re.compile(r'^export\s+default\s+(\w+)', re.MULTILINE),
+    ],
+    "go": [
+        re.compile(r'^func\s+(\w+)', re.MULTILINE),
+        re.compile(r'^type\s+(\w+)\s', re.MULTILINE),
+    ],
+    "java": [
+        re.compile(r'^\s*(?:public|private|protected)?\s+(?:static\s+)?(?:class|interface|enum)\s+(\w+)', re.MULTILINE),
+        re.compile(r'^\s*(?:public|private|protected)?\s+\w+\s+(\w+)\s*\(', re.MULTILINE),
+    ],
+    "rb": [
+        re.compile(r'^def\s+(?:self\.)?(\w+)', re.MULTILINE),
+        re.compile(r'^class\s+(\w+)', re.MULTILINE),
+    ],
+}
+
+IMPORT_PATTERNS_CODE: dict[str, list[re.Pattern]] = {
+    "py": [
+        re.compile(r'^\s*from\s+[\w.]+\s+import\s+([^#]+)', re.MULTILINE),
+        re.compile(r'^\s*import\s+(\w+)', re.MULTILINE),
+    ],
+    "js": [
+        re.compile(r'import\s+\{?([^}]+)\}?\s+from', re.MULTILINE),
+        re.compile(r'import\s+(\w+)\s+from', re.MULTILINE),
+        re.compile(r'require\([\'"]([^\'"]+)[\'"]\)', re.MULTILINE),
+    ],
+    "ts": [
+        re.compile(r'import\s+\{?([^}]+)\}?\s+from', re.MULTILINE),
+        re.compile(r'import\s+(\w+)\s+from', re.MULTILINE),
+        re.compile(r'require\([\'"]([^\'"]+)[\'"]\)', re.MULTILINE),
+    ],
+}
+
+
+async def find_dead_code(root_path: str) -> dict[str, Any]:
+    root = Path(root_path).resolve()
+    if not root.is_dir():
+        return {"error": f"Directory not found: {root_path}"}
+
+    source_files = collect_source_files(root)
+
+    all_defs: dict[str, list[dict]] = {}
+    file_imports: dict[str, set[str]] = {}
+
+    for filepath in source_files:
+        ext = filepath.suffix.lower().lstrip(".")
+        if ext not in DEF_PATTERNS:
+            continue
+        if filepath.name.endswith(".d.ts"):
+            continue
+        try:
+            content = filepath.read_text(encoding="utf-8", errors="ignore")
+            relative = filepath.relative_to(root).as_posix()
+        except Exception:
+            continue
+
+        defs: list[dict] = []
+        for pat in DEF_PATTERNS[ext]:
+            for match in pat.finditer(content):
+                name = match.group(1)
+                if not name or name.startswith("_"):
+                    continue
+                line_num = content[: match.start()].count("\n") + 1
+                defs.append({
+                    "name": name,
+                    "line": line_num,
+                })
+        if defs:
+            all_defs[relative] = defs
+
+        imported_names: set[str] = set()
+        if ext in IMPORT_PATTERNS_CODE:
+            for pat in IMPORT_PATTERNS_CODE[ext]:
+                for match in pat.finditer(content):
+                    captured = match.group(1)
+                    if not captured:
+                        continue
+                    if "," in captured:
+                        for part in captured.split(","):
+                            clean = part.strip().split(" as ")[0].split(".")[0].strip()
+                            if clean and not clean.startswith("_"):
+                                imported_names.add(clean)
+                    else:
+                        clean = captured.strip().split(" as ")[0].split(".")[0].strip()
+                        if clean and not clean.startswith("_"):
+                            imported_names.add(clean)
+        file_imports[relative] = imported_names
+
+    defs_by_name: dict[str, list[tuple[str, int, str]]] = {}
+    for filepath, defs in all_defs.items():
+        for d in defs:
+            defs_by_name.setdefault(d["name"], []).append((filepath, d["line"], d["name"]))
+
+    dead_items: list[dict] = []
+    checked: set[str] = set()
+
+    for name, occurrences in defs_by_name.items():
+        if name in checked:
+            continue
+        checked.add(name)
+
+        defining_files = set(f for f, _, _ in occurrences)
+
+        filtered: set[str] = set()
+        for df in defining_files:
+            try:
+                content = (root / df).read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                filtered.add(df)
+                continue
+            df_occurrences = len(re.findall(r'\b' + re.escape(name) + r'\b', content))
+            if df_occurrences <= 1:
+                filtered.add(df)
+
+        if not filtered:
+            continue
+
+        referenced_elsewhere = False
+        for filepath in source_files:
+            relative = filepath.relative_to(root).as_posix()
+            if relative in filtered:
+                continue
+            try:
+                content = filepath.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+
+            if name in file_imports.get(relative, set()):
+                referenced_elsewhere = True
+                break
+
+            if bool(re.search(r'\b' + re.escape(name) + r'\b', content)):
+                referenced_elsewhere = True
+                break
+
+        if not referenced_elsewhere:
+            for filepath, line, _ in occurrences:
+                if filepath not in filtered:
+                    continue
+                dead_items.append({
+                    "name": name,
+                    "file": filepath,
+                    "line": line,
+                })
+
+    dead_items.sort(key=lambda x: (x["file"], x["line"]))
+
+    dead_summary: dict[str, list[dict]] = {}
+    for item in dead_items:
+        dead_summary.setdefault(item["file"], []).append({
+            "name": item["name"],
+            "line": item["line"],
+        })
+
+    total_defs = sum(len(v) for v in all_defs.values())
+    checked_names = set(d["name"] for d_list in all_defs.values() for d in d_list)
+
+    lines = [
+        f"# Dead Code Analysis: {root.name}",
+        "",
+        f"**Total definitions found:** {total_defs}  |  **Potentially unused:** {len(dead_items)}",
+        f"**Files with dead code:** {len(dead_summary)}",
+        "",
+    ]
+
+    if not dead_items:
+        lines.append("No dead code detected.")
+        lines.append("")
+        lines.append("This could mean all defined functions/classes are referenced elsewhere,")
+        lines.append("or the detection patterns didn't match the codebase's language.")
+        return {
+            "projectName": root.name,
+            "totalDefinitions": total_defs,
+            "deadCount": 0,
+            "deadFiles": 0,
+            "deadItems": [],
+            "report": "\n".join(lines),
+        }
+
+    lines.append("## Unused Definitions")
+    lines.append("")
+    for filepath, items in sorted(dead_summary.items()):
+        lines.append(f"### `{filepath}` ({len(items)})")
+        for item in items:
+            lines.append(f"- Line {item['line']}: `{item['name']}`")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("> **Note:** This is a heuristic analysis based on cross-referencing definitions")
+    lines.append("> across files. Some results may be false positives (e.g., dynamically accessed")
+    lines.append("> code, decorators, or names matched indirectly). Verify before removing.")
+
+    return {
+        "projectName": root.name,
+        "totalDefinitions": total_defs,
+        "deadCount": len(dead_items),
+        "deadFiles": len(dead_summary),
+        "deadItems": dead_items,
+        "report": "\n".join(lines),
+    }

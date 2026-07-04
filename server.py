@@ -5,6 +5,7 @@ from analyzer import (
     analyze_codebase,
     find_features as find_features_in_files,
     search_codebase,
+    generate_architecture_diagram,
 )
 
 mcp = FastMCP("codebase-explorer")
@@ -155,6 +156,15 @@ async def get_feature_detail(path: str, name: str) -> str:
         result.append(f"{marker} {i+1}: {content_lines[i]}")
 
     return "\n".join(result)
+
+
+@mcp.tool()
+async def generate_architecture(path: str) -> str:
+    """Generate a layered architecture diagram (Mermaid) for the codebase — shows entry points, API routes, services, data models, and how they connect."""
+    result = await generate_architecture_diagram(path)
+    if "error" in result:
+        return f"Error: {result['error']}"
+    return result["diagram"]
 
 
 @mcp.tool()

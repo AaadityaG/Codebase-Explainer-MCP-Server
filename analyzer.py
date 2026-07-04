@@ -496,3 +496,242 @@ async def analyze_codebase(root_path: str, max_depth: int = 4) -> dict[str, Any]
         ],
         "structure": structure,
     }
+
+
+LAYER_MAP = {
+    "API Route": "API", "API Endpoint": "API", "API View": "API",
+    "ViewSet": "API", "Model ViewSet": "API", "Generic ViewSet": "API",
+    "Controller": "API", "REST Controller": "API",
+    "Router": "API", "Router Include": "API",
+    "URL Rule": "API",
+    "Service": "Logic", "Celery Task": "Logic", "Background Task": "Logic",
+    "Handler": "Logic", "Request Handler": "Logic",
+    "Injectable": "Logic",
+    "Repository": "Data", "Serializer": "Data", "Model Serializer": "Data",
+    "Entity": "Data", "Database Client": "Data",
+    "Component": "UI", "Angular Component": "UI", "React Component": "UI",
+    "React State": "UI", "React Effect": "UI", "React Context": "UI",
+    "NgModule": "Config",
+}
+
+CODE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".rb", ".cs", ".php", ".swift", ".kt"}
+
+LAYER_COLORS = {
+    "Entry": "#e1f5fe",
+    "API": "#e8f5e9",
+    "Logic": "#fff3e0",
+    "Data": "#fce4ec",
+    "UI": "#f3e5f5",
+    "Config": "#f5f5f5",
+}
+
+IMPORT_PATTERNS = re.compile(
+    r'(?:from\s+([.\w]+)\s+import|import\s+[\'"]([^"\']+)[\'"]|require\([\'"]([^"\']+)[\'"]\)|from\s+[\'"]([^"\']+)[\'"]\s+import)',
+    re.MULTILINE,
+)
+
+
+def _match_import(imported: str, source_files: list[Path], root: Path) -> str | None:
+    normalized = imported.replace(".", "/")
+    for sf in source_files:
+        sf_rel = sf.relative_to(root).as_posix()
+        sf_stem = sf_rel.rsplit(".", 1)[0] if "." in sf_rel else sf_rel
+        if normalized == sf_stem or normalized == sf_rel or sf_stem.endswith("/" + normalized):
+            return sf_rel
+        if normalized + "/__init__" in sf_stem:
+            return sf_rel
+    return None
+
+
+async def generate_architecture_diagram(root_path: str) -> dict[str, Any]:
+    root = Path(root_path).resolve()
+    if not root.is_dir():
+        return {"error": f"Directory not found: {root_path}"}
+
+    info = await analyze_codebase(root_path)
+    if "error" in info:
+        return info
+
+    features: list[dict] = info["features"]
+    entry_points: list[dict] = info["entryPoints"]
+
+    layers: dict[str, dict] = {
+        "Entry": {"label": "Entry Points", "nodes": {}, "color": LAYER_COLORS["Entry"]},
+        "API": {"label": "API / Routes", "nodes": {}, "color": LAYER_COLORS["API"]},
+        "Logic": {"label": "Services / Logic", "nodes": {}, "color": LAYER_COLORS["Logic"]},
+        "Data": {"label": "Data / Models", "nodes": {}, "color": LAYER_COLORS["Data"]},
+        "UI": {"label": "UI / Components", "nodes": {}, "color": LAYER_COLORS["UI"]},
+        "Config": {"label": "Config", "nodes": {}, "color": LAYER_COLORS["Config"]},
+    }
+
+    def node_id(file: str) -> str:
+        return file.replace("/", "_").replace(".", "_").replace("-", "_")
+
+    PATH_LAYER_OVERRIDES = {
+        "database": "Data", "models": "Data", "model": "Data",
+        "repository": "Data", "repositories": "Data",
+        "entity": "Data", "schema": "Data", "schemas": "Data",
+        "migration": "Data", "migrations": "Data",
+        "auth": "Logic", "middleware": "Logic", "middlewares": "Logic",
+        "service": "Logic", "services": "Logic", "utils": "Logic", "util": "Logic",
+        "helper": "Logic", "helpers": "Logic", "lib": "Logic",
+        "component": "UI", "components": "UI",
+        "page": "UI", "pages": "UI", "screen": "UI", "screens": "UI",
+        "layout": "UI", "layouts": "UI", "widget": "UI", "widgets": "UI",
+        "config": "Config", "configuration": "Config",
+        "constant": "Config", "constants": "Config",
+    }
+
+    def path_to_layer(filepath: str) -> str | None:
+        parts = filepath.replace("\\", "/").lower().split("/")
+        for part in parts:
+            stem = part.split(".")[0]
+            if stem in PATH_LAYER_OVERRIDES:
+                return PATH_LAYER_OVERRIDES[stem]
+        return None
+
+    all_nodes: dict[str, dict] = {}
+    ep_files = {ep["file"] for ep in entry_points}
+
+    for ep in entry_points:
+        nid = node_id(ep["file"])
+        all_nodes[nid] = {
+            "label": ep["file"].split("/")[-1],
+            "file": ep["file"],
+            "types": ["Entry Point"],
+            "layer": "Entry",
+        }
+
+    for f in features:
+        nid = node_id(f["location"])
+        if nid in all_nodes:
+            if f["type"] not in all_nodes[nid]["types"]:
+                all_nodes[nid]["types"].append(f["type"])
+            continue
+        path_layer = path_to_layer(f["location"])
+        layer = path_layer or LAYER_MAP.get(f["type"], "Logic")
+        all_nodes[nid] = {
+            "label": f["location"].split("/")[-1],
+            "file": f["location"],
+            "types": [f["type"]],
+            "layer": layer,
+        }
+
+    source_files = collect_source_files(root)
+
+    connections: list[tuple[str, str]] = []
+    for filepath in source_files:
+        try:
+            content = filepath.read_text(encoding="utf-8", errors="ignore")
+            relative = filepath.relative_to(root).as_posix()
+        except Exception:
+            continue
+        for match in IMPORT_PATTERNS.finditer(content):
+            imported = next(g for g in match.groups() if g)
+            if not imported:
+                continue
+            target = _match_import(imported, source_files, root)
+            if target and target != relative:
+                connections.append((relative, target))
+
+    for nid, node in all_nodes.items():
+        layers[node["layer"]]["nodes"][nid] = node
+
+    connected_files = set()
+    for f, t in connections:
+        connected_files.add(f)
+        connected_files.add(t)
+
+    for sf in source_files:
+        relative = sf.relative_to(root).as_posix()
+        nid = node_id(relative)
+        if nid in all_nodes:
+            continue
+        if relative not in connected_files:
+            continue
+        if sf.suffix.lower() not in CODE_EXTENSIONS:
+            continue
+        path_layer = path_to_layer(relative) or "Logic"
+        layers[path_layer]["nodes"][nid] = {
+            "label": relative.split("/")[-1],
+            "file": relative,
+            "types": [],
+        }
+
+    seen_conns: set[tuple[str, str]] = set()
+    unique_conns: list[tuple[str, str]] = []
+    for f, t in connections:
+        key = (f, t)
+        if key not in seen_conns:
+            seen_conns.add(key)
+            unique_conns.append(key)
+
+    def dir_group(entries: dict) -> dict[str, list]:
+        groups: dict[str, list] = {}
+        for nid, node in entries.items():
+            parts = node["file"].split("/")
+            group = "/".join(parts[:-1]) if len(parts) > 1 else "/"
+            groups.setdefault(group, []).append((nid, node))
+        return groups
+
+    def escape_mermaid(text: str) -> str:
+        return text.replace('"', "#quot;").replace("[", "(").replace("]", ")")
+
+    md_lines = []
+    md_lines.append(f"# Architecture Diagram: {info['projectName']}")
+    md_lines.append("")
+    if info["framework"]:
+        md_lines.append(f"**Framework:** {info['framework']}")
+    if info["projectType"]:
+        md_lines.append(f"**Type:** {info['projectType']}")
+    md_lines.append(f"**Files:** {info['fileCount']}  |  **Features:** {len(features)}")
+    md_lines.append("")
+    md_lines.append("```mermaid")
+    md_lines.append("graph TD")
+
+    for layer_key, layer in layers.items():
+        nodes = layer["nodes"]
+        if not nodes:
+            continue
+        md_lines.append(f"    subgraph {layer_key}[{layer['label']}]")
+        groups = dir_group(nodes)
+        for group_name, group_nodes in sorted(groups.items()):
+            if len(group_nodes) > 1 and group_name != "/":
+                md_lines.append(f"        subgraph G_{node_id(group_name)}[{escape_mermaid(group_name)}]")
+                for nid, node in sorted(group_nodes, key=lambda x: x[1]["label"]):
+                    label = escape_mermaid(node["label"])
+                    md_lines.append(f"            {nid}[\"{label}\"]")
+                md_lines.append("        end")
+            else:
+                for nid, node in sorted(group_nodes, key=lambda x: x[1]["label"]):
+                    label = escape_mermaid(node["label"])
+                    md_lines.append(f"        {nid}[\"{label}\"]")
+        md_lines.append("    end")
+
+    if unique_conns:
+        for f, t in unique_conns[:40]:
+            f_id = node_id(f)
+            t_id = node_id(t)
+            md_lines.append(f"    {f_id} --> {t_id}")
+
+    md_lines.append("```")
+    md_lines.append("")
+    md_lines.append("### Layer Summary")
+    md_lines.append("")
+    md_lines.append("| Layer | Files | Types |")
+    md_lines.append("|---|---|---|")
+    for layer_key in ["Entry", "API", "Logic", "Data", "UI", "Config"]:
+        layer = layers[layer_key]
+        if layer["nodes"]:
+            all_types = sorted(set(t for n in layer["nodes"].values() for t in n["types"]))
+            md_lines.append(f"| {layer['label']} | {len(layer['nodes'])} | {', '.join(all_types[:5])} |")
+
+    return {
+        "projectName": info["projectName"],
+        "projectPath": str(info.get("projectPath", str(root))),
+        "projectType": info["projectType"],
+        "framework": info["framework"],
+        "layers": {k: len(v["nodes"]) for k, v in layers.items() if v["nodes"]},
+        "connections": len(unique_conns),
+        "diagram": "\n".join(md_lines),
+    }

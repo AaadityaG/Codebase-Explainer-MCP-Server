@@ -75,7 +75,6 @@ Opens `http://localhost:6274` — test all tools live in a web UI.
 | `get_git_info` | `path` | Git branch, recent commits, contributors, hot files, uncommitted changes |
 | `find_secrets` | `path` | Hardcoded API keys, tokens, passwords, private keys, database credentials |
 | `search_symbols` | `path`, `pattern` | Regex search results across all source files |
-| `list_project_types` | _(none)_ | List of project types and frameworks the server can detect |
 
 ### Example flow
 

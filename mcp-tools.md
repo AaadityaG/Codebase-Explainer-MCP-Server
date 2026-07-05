@@ -77,6 +77,7 @@ find_features(path="C:\\MyProject", type_filter="API Route")
 
 ## `get_feature_detail`
 Show code context around a detected feature by name. Auto-locates the file and line — no need to know where it lives.
+To disambiguate when names collide, append `@filepath:line` to the name (e.g. `"get_user_settings@settings.py"` or `"health_check@main.py:34"`).
 
 ```
 get_feature_detail(path="C:\\MyProject", name="get_activity_history")
@@ -359,42 +360,4 @@ search_symbols(path="C:\\MyProject", pattern="todo:", file_ext="py,ts")
 - `pattern` — Regex pattern
 - `file_ext` (optional) — Comma-separated extensions (e.g. `"py,js,ts"`)
 
----
 
-## `list_project_types`
-Show all project types and frameworks the server can detect. No parameters needed.
-
-```
-list_project_types()
-
-  # Detectable Project Types & Frameworks
-
-  ## Project Types (auto-detected)
-  - Django (manage.py)
-  - Flask/FastAPI (app.py patterns)
-  - Next.js (next.config.*)
-  - Node.js (package.json)
-  - Maven (pom.xml)
-  - Gradle (build.gradle)
-  - Rust (Cargo.toml)
-  - Go (go.mod)
-  - Ruby (Gemfile)
-  - .NET (.sln/.csproj)
-  - PHP (composer.json)
-
-  ## Frameworks
-  - FastAPI, Flask, Django
-  - Express.js, Next.js
-  - React, Vue, Angular
-  - Spring Boot
-  - Rails, Laravel
-  - ASP.NET Core
-  - Gin (Go)
-  - Many more via dependency detection
-
-  ## Detectable Feature Types
-  API Route, API Endpoint, Controller, Service, Repository,
-  Model Serializer, ViewSet, Component (React/Vue/Angular),
-  Test/Spec, Celery Task, Router, Interface, Schema,
-  Redux Slice, Zod Schema, Entity, and more.
-```

@@ -1,7 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 
 from analyzer import (
-    Feature,
     analyze_codebase,
     find_features as find_features_in_files,
     search_codebase,
@@ -47,14 +46,10 @@ async def analyze_structure(path: str, depth: int = 3) -> str:
 async def find_features(path: str, type_filter: str = "") -> str:
     """Detect features, API routes, controllers, components, and patterns in the codebase.
     Optionally filter by type (e.g. 'API Route', 'Controller', 'Component', 'Test')."""
-    root_dir = path
-    features: list[Feature] = []
-
     from pathlib import Path
+    from analyzer import Feature, collect_source_files
 
-    root = Path(root_dir).resolve()
-
-    from analyzer import collect_source_files
+    root = Path(path).resolve()
 
     if root.is_file():
         source_files = [root]
@@ -62,9 +57,9 @@ async def find_features(path: str, type_filter: str = "") -> str:
     elif root.is_dir():
         source_files = collect_source_files(root)
     else:
-        return f"Error: Path not found: {root_dir}"
+        return f"Error: Path not found: {path}"
 
-    features = await find_features_in_files(root, source_files)
+    features: list[Feature] = await find_features_in_files(root, source_files)
 
     if type_filter:
         features = [f for f in features if type_filter.lower() in f.type.lower()]
@@ -115,6 +110,8 @@ async def search_symbols(path: str, pattern: str, file_ext: str = "") -> str:
 @mcp.tool()
 async def get_feature_detail(path: str, name: str) -> str:
     """Get detailed code context around a feature by name.
+    To disambiguate when names collide, append @filepath:line to the name
+    (e.g. \"get_user_settings@settings.py\" or \"health_check@main.py:34\").
     The feature name is matched against detected routes, controllers, services, etc."""
     from pathlib import Path
     from analyzer import collect_source_files, find_features as find_features_in_files
@@ -123,19 +120,44 @@ async def get_feature_detail(path: str, name: str) -> str:
     if not root.is_dir():
         return f"Error: Directory not found: {path}"
 
+    target_file = None
+    target_line = None
+    if "@" in name:
+        name_part, _, hint = name.partition("@")
+        if ":" in hint:
+            hint_file, _, hint_line = hint.partition(":")
+            try:
+                target_line = int(hint_line)
+            except ValueError:
+                pass
+        else:
+            hint_file = hint
+        target_file = hint_file.replace("\\", "/")
+        name = name_part
+
     source_files = collect_source_files(root)
     features = await find_features_in_files(root, source_files)
 
     matches = [f for f in features if name.lower() in f.name.lower()]
+    if target_file:
+        matches = [f for f in matches if target_file.lower() in f.location.lower().replace("\\", "/")]
+    if target_line is not None:
+        exact = [f for f in matches if f.line == target_line]
+        if exact:
+            matches = exact
+
     if not matches:
         types = sorted({f.type for f in features})
-        return f"No feature matching '{name}' found.\n\nAvailable types: {', '.join(types)}\nHint: use `find_features` to list features first."
+        hint = ""
+        if target_file:
+            hint = f" in file matching '{target_file}'"
+        return f"No feature matching '{name}'{hint} found.\n\nAvailable types: {', '.join(types)}\nHint: use `find_features` to list features first."
 
     if len(matches) > 1:
         lines = [f"# Multiple matches for '{name}' ({len(matches)} found)\n"]
         for i, m in enumerate(matches, 1):
             lines.append(f"{i}. `{m.name}` -> {m.location}:{m.line}  ({m.type})")
-        lines.append(f"\nTo narrow down, use a more specific name from `find_features` output.")
+        lines.append(f"\nTo narrow down, append @filepath to the name (e.g. \"{name}@{matches[0].location}\").")
         return "\n".join(lines)
 
     feat = matches[0]
@@ -195,41 +217,6 @@ async def find_secrets(path: str) -> str:
     if "error" in result:
         return f"Error: {result['error']}"
     return result["report"]
-
-
-@mcp.tool()
-async def list_project_types() -> str:
-    """List all project types and frameworks this server can detect."""
-    return """# Detectable Project Types & Frameworks
-
-## Project Types (auto-detected)
-- Django (manage.py)
-- Flask/FastAPI (app.py patterns)
-- Next.js (next.config.*)
-- Node.js (package.json)
-- Maven (pom.xml)
-- Gradle (build.gradle)
-- Rust (Cargo.toml)
-- Go (go.mod)
-- Ruby (Gemfile)
-- .NET (.sln/.csproj)
-- PHP (composer.json)
-
-## Frameworks
-- FastAPI, Flask, Django
-- Express.js, Next.js
-- React, Vue, Angular
-- Spring Boot
-- Rails, Laravel
-- ASP.NET Core
-- Gin (Go)
-- Many more via dependency detection
-
-## Detectable Feature Types
-API Route, API Endpoint, Controller, Service, Repository,
-Model Serializer, ViewSet, Component (React/Vue/Angular),
-Test/Spec, Celery Task, Router, Interface, Schema,
-Redux Slice, Zod Schema, Entity, and more."""
 
 
 def main():

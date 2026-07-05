@@ -410,10 +410,35 @@ async def find_features(root: Path, source_files: list[Path]) -> list[Feature]:
         relative = filepath.relative_to(root).as_posix()
 
         for pattern, feature_type, description in patterns:
+            if feature_type in ("Test", "Test Case", "Test Suite"):
+                parts = relative.lower().split("/")
+                is_test_file = any(
+                    p in ("test", "tests", "__tests__", "__test__", "spec", "specs")
+                    or ".test." in p or ".spec." in p or "_test." in p or "_spec." in p
+                    for p in parts
+                )
+                if not is_test_file:
+                    continue
+
             for match in re.finditer(pattern, content, re.MULTILINE):
                 line_num = content[: match.start()].count("\n") + 1
+                raw_name = match.group(0).strip()[:80]
+
+                if feature_type == "API Route" and raw_name.startswith("@"):
+                    content_after = content[match.end():]
+                    next_def = re.search(
+                        r'(?:async\s+)?def\s+(\w+)',
+                        content_after,
+                    )
+                    if next_def:
+                        name = next_def.group(1)
+                    else:
+                        name = raw_name
+                else:
+                    name = raw_name
+
                 features.append(Feature(
-                    name=match.group(0).strip()[:80],
+                    name=name,
                     type=feature_type,
                     location=relative,
                     line=line_num,

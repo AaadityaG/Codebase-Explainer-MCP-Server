@@ -957,7 +957,7 @@ async def find_dead_code(root_path: str) -> dict[str, Any]:
 
 # ============ Git Intelligence ============
 
-async def find_git_info(root_path: str) -> dict[str, Any]:
+def find_git_info_sync(root_path: str) -> dict[str, Any]:
     root = Path(root_path).resolve()
     if not root.is_dir():
         return {"error": f"Directory not found: {root_path}"}
@@ -966,40 +966,43 @@ async def find_git_info(root_path: str) -> dict[str, Any]:
     if not git_dir.exists():
         return {"error": "Not a git repository (no .git directory)"}
 
-    async def _git(args: str) -> str:
-        loop = asyncio.get_event_loop()
+    from collections import Counter
+
+    def _git(args: str, timeout: int = 20) -> str:
         try:
-            proc = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    ["git", "-C", str(root)] + args.split(),
-                    capture_output=True, text=True, timeout=15,
-                    encoding="utf-8", errors="ignore",
-                ),
+            result = subprocess.run(
+                ["git", "-C", str(root)] + args.split(),
+                capture_output=True, text=True, timeout=timeout,
+                encoding="utf-8", errors="ignore",
+                stdin=subprocess.DEVNULL,
             )
-            return proc.stdout.strip()
+            return result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            return ""
+        except FileNotFoundError:
+            return ""
         except Exception:
             return ""
 
-    branch = await _git("rev-parse --abbrev-ref HEAD")
-    remote = await _git("config --get remote.origin.url")
-    total_commits = await _git("rev-list --count HEAD")
+    branch = _git("rev-parse --abbrev-ref HEAD")
+    remote = _git("config --get remote.origin.url")
+    total_commits = _git("rev-list --count HEAD", timeout=10)
 
-    log_raw = await _git("log --oneline -25 --format=%H%x00%an%x00%ai%x00%s")
-    commits: list[dict[str, str]] = []
+    log_raw = _git("log -25 --format=%H%x00%an%x00%ai%x00%s")
+    commits_list: list[dict[str, str]] = []
     for entry in log_raw.split("\n"):
         if not entry:
             continue
         parts = entry.split("\0", 3)
         if len(parts) >= 4:
-            commits.append({
+            commits_list.append({
                 "hash": parts[0][:8],
                 "author": parts[1],
                 "date": parts[2],
                 "message": parts[3],
             })
 
-    shortlog = await _git("shortlog -sne HEAD")
+    shortlog = _git("shortlog -sne HEAD", timeout=10)
     contribs: list[dict[str, Any]] = []
     for line in shortlog.split("\n"):
         line = line.strip()
@@ -1021,7 +1024,7 @@ async def find_git_info(root_path: str) -> dict[str, Any]:
                 "commits": int(count_s),
             })
 
-    status_raw = await _git("status --short")
+    status_raw = _git("status --short")
     uncommitted: dict[str, list[str]] = {"modified": [], "staged": [], "untracked": []}
     for line in status_raw.split("\n"):
         line = line.rstrip("\n")
@@ -1038,19 +1041,71 @@ async def find_git_info(root_path: str) -> dict[str, Any]:
         if y != " ":
             uncommitted["modified"].append(fpath)
 
-    hot_raw = await _git("log --format= --name-only | sort | uniq -c | sort -rn | head -20")
-    hot_files: list[dict[str, Any]] = []
+    hot_raw = _git("log --format= --name-only -200", timeout=10)
+    hot_counter: Counter = Counter()
     for line in hot_raw.split("\n"):
         line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) == 2 and parts[0].isdigit():
-            hot_files.append({"file": parts[1], "changes": int(parts[0])})
+        if line:
+            hot_counter[line] += 1
+    hot_files: list[dict[str, Any]] = [
+        {"file": f, "changes": c} for f, c in hot_counter.most_common(15)
+    ]
 
-    first_date = await _git("log --format=%ai --max-parents=0 HEAD")
-    last_date = await _git("log -1 --format=%ai")
+    first_date = _git("log --format=%ai --max-parents=0 HEAD")
+    last_date = _git("log -1 --format=%ai")
     total_changes = sum(len(v) for v in uncommitted.values())
+
+    lines: list[str] = [
+        f"# Git Intelligence: {root.name}",
+        "",
+        f"**Branch:** `{branch or '(detached)'}`",
+        f"**Remote:** `{remote or '(none)'}`",
+        f"**Total commits:** `{total_commits or 0}`",
+        f"**Created:** `{first_date or 'N/A'}`  |  **Last commit:** `{last_date or 'N/A'}`",
+        f"**Uncommitted changes:** {total_changes}",
+    ]
+
+    if commits_list:
+        lines.append(f"\n## Recent Commits ({len(commits_list)})")
+        for c in commits_list:
+            lines.append(f"- `{c['hash']}` {c['author']} ({c['date'][:10]})  {c['message']}")
+
+    if contribs:
+        lines.append(f"\n## Contributors ({len(contribs)})")
+        for c in contribs:
+            lines.append(f"- {c['name']}  {c['commits']} commits")
+
+    if hot_files:
+        lines.append(f"\n## Hot Files (most frequently changed)")
+        for hf in hot_files[:10]:
+            lines.append(f"- `{hf['file']}`  {hf['changes']} changes")
+
+    if total_changes > 0:
+        lines.append(f"\n## Uncommitted Changes ({total_changes})")
+        for category in ("staged", "modified", "untracked"):
+            label = {"staged": "Staged", "modified": "Modified", "untracked": "Untracked"}[category]
+            items = uncommitted[category]
+            if items:
+                for f in items[:10]:
+                    lines.append(f"- [{label}] `{f}`")
+                if len(items) > 10:
+                    lines.append(f"  ...and {len(items) - 10} more")
+
+    return {
+        "projectName": root.name,
+        "branch": branch or "(detached)",
+        "remote": remote or "(none)",
+        "totalCommits": int(total_commits) if total_commits.isdigit() else 0,
+        "recentCommits": commits_list,
+        "contributors": contribs,
+        "hotFiles": hot_files,
+        "uncommittedChanges": uncommitted,
+        "report": "\n".join(lines),
+    }
+
+
+async def find_git_info(root_path: str) -> dict[str, Any]:
+    return find_git_info_sync(root_path)
 
     lines: list[str] = [
         f"# Git Intelligence: {root.name}",

@@ -2,6 +2,14 @@
 
 An MCP server that analyzes any codebase — detects project type, languages, framework, entry points, API routes, controllers, services, components, tests, and more.
 
+<p align="center">
+  <a href="https://youtu.be/frYeOemHFos">
+    <img src="https://img.youtube.com/vi/frYeOemHFos/0.jpg" alt="Demo video" width="600">
+  </a>
+  <br>
+  <em>Click the image above to watch the demo video →</em>
+</p>
+
 ## Quick start
 
 ### 1. Install `uv`
